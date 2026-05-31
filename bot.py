@@ -1,5 +1,5 @@
 import os
-import psycopg2
+import pg8000.native
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -12,15 +12,26 @@ ADMIN_ID = 868999453
 CHANNELS = ["@penguin_110", "@Crypto_Dragon13"]
 REWARD_PER_REFERRAL = 0.02
 MIN_WITHDRAW = 0.2
-DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:a1s2d3f411@@#@&6@db.hdbbhhgnphtkiugtomvm.supabase.co:5432/postgres")
+
+DB_HOST = "db.hdbbhhgnphtkiugtomvm.supabase.co"
+DB_NAME = "postgres"
+DB_USER = "postgres"
+DB_PASS = os.getenv("DB_PASS", "a1s2d3f411@@#@&6")
+DB_PORT = 5432
 
 def get_db():
-    return psycopg2.connect(DB_URL)
+    return pg8000.native.Connection(
+        host=DB_HOST,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        port=DB_PORT,
+        ssl_context=True
+    )
 
 def init_db():
     conn = get_db()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
+    conn.run('''CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
         username TEXT,
         balance REAL DEFAULT 0,
@@ -28,7 +39,7 @@ def init_db():
         referred_by BIGINT DEFAULT NULL,
         joined_at TEXT
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
+    conn.run('''CREATE TABLE IF NOT EXISTS withdrawals (
         id SERIAL PRIMARY KEY,
         user_id BIGINT,
         amount REAL,
@@ -36,49 +47,40 @@ def init_db():
         status TEXT DEFAULT 'pending',
         requested_at TEXT
     )''')
-    conn.commit()
     conn.close()
 
 def get_user(user_id):
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-    row = c.fetchone()
+    row = conn.run("SELECT * FROM users WHERE user_id=:uid", uid=user_id)
     conn.close()
-    return row
+    return row[0] if row else None
 
 def add_user(user_id, username, referred_by=None):
     conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO users (user_id, username, referred_by, joined_at) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-        (user_id, username, referred_by, datetime.now().isoformat())
+    conn.run(
+        "INSERT INTO users (user_id, username, referred_by, joined_at) VALUES (:uid,:uname,:ref,:joined) ON CONFLICT DO NOTHING",
+        uid=user_id, uname=username, ref=referred_by, joined=datetime.now().isoformat()
     )
     if referred_by and referred_by != user_id:
-        c.execute(
-            "UPDATE users SET balance=balance+%s, referrals=referrals+1 WHERE user_id=%s",
-            (REWARD_PER_REFERRAL, referred_by)
+        conn.run(
+            "UPDATE users SET balance=balance+:reward, referrals=referrals+1 WHERE user_id=:ref",
+            reward=REWARD_PER_REFERRAL, ref=referred_by
         )
-    conn.commit()
     conn.close()
 
 def get_balance(user_id):
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT balance, referrals FROM users WHERE user_id=%s", (user_id,))
-    row = c.fetchone()
+    row = conn.run("SELECT balance, referrals FROM users WHERE user_id=:uid", uid=user_id)
     conn.close()
-    return row if row else (0, 0)
+    return (row[0][0], row[0][1]) if row else (0, 0)
 
 def add_withdrawal(user_id, amount, wallet):
     conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO withdrawals (user_id, amount, wallet, requested_at) VALUES (%s,%s,%s,%s)",
-        (user_id, amount, wallet, datetime.now().isoformat())
+    conn.run(
+        "INSERT INTO withdrawals (user_id, amount, wallet, requested_at) VALUES (:uid,:amt,:wallet,:req)",
+        uid=user_id, amt=amount, wallet=wallet, req=datetime.now().isoformat()
     )
-    c.execute("UPDATE users SET balance=balance-%s WHERE user_id=%s", (amount, user_id))
-    conn.commit()
+    conn.run("UPDATE users SET balance=balance-:amt WHERE user_id=:uid", amt=amount, uid=user_id)
     conn.close()
 
 async def check_subscriptions(user_id, context):
@@ -231,11 +233,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")
-    pending = c.fetchone()[0]
+    total_users = conn.run("SELECT COUNT(*) FROM users")[0][0]
+    pending = conn.run("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")[0][0]
     conn.close()
     await update.message.reply_text(
         f"📊 إحصائيات البوت:\n\n"
