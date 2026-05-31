@@ -199,7 +199,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif text == "💵 سحب":
         balance, _ = get_balance(user.id)
-        if balance < MIN_WITHDRAW - 0.001:
+        if round(balance, 2) < MIN_WITHDRAW:
             await update.message.reply_text(
                 f"❌ رصيدك {balance:.2f}$ أقل من الحد الأدنى ({MIN_WITHDRAW}$)\n"
                 f"تحتاج {MIN_WITHDRAW - balance:.2f}$ إضافية.",
