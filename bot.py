@@ -1,8 +1,7 @@
 import os
 import sqlite3
-import asyncio
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -85,7 +84,16 @@ async def check_subscriptions(user_id, context):
             return False
     return True
 
-# ========== الأزرار الرئيسية ==========
+# ========== لوحة المفاتيح الثابتة (تحت) ==========
+def reply_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🔗 رابط الإحالة"), KeyboardButton("💰 رصيدي")],
+        [KeyboardButton("👥 إحالاتي"), KeyboardButton("💵 سحب")],
+        [KeyboardButton("📋 شروط الاشتراك")],
+        [KeyboardButton("📣 الدعم والإعلان")]
+    ], resize_keyboard=True)
+
+# ========== الأزرار المضمنة (فوق) ==========
 def main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 رابط الإحالة", callback_data="referral"),
@@ -132,9 +140,96 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 بوت penguin للإحالات\n"
         f"💰 اربح {REWARD_PER_REFERRAL}$ لكل صديق تدعوه!\n"
         f"📌 الحد الأدنى للسحب: {MIN_WITHDRAW}$",
-        reply_markup=main_keyboard()
+        reply_markup=reply_keyboard()
     )
 
+# ========== معالج الرسائل النصية (أزرار التحت) ==========
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+
+    if context.user_data.get("awaiting_wallet"):
+        wallet = text.strip()
+        amount = context.user_data["withdraw_amount"]
+        add_withdrawal(user.id, amount, wallet)
+        context.user_data.pop("awaiting_wallet", None)
+        context.user_data.pop("withdraw_amount", None)
+
+        await update.message.reply_text(
+            "✅ تم تقديم طلب السحب وسيتم مراجعته من قبل الإدارة.",
+            reply_markup=reply_keyboard()
+        )
+        username = f"@{user.username}" if user.username else str(user.id)
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"💵 طلب سحب جديد!\n\n"
+            f"👤 المستخدم: {username} ({user.id})\n"
+            f"💰 المبلغ: {amount:.2f}$\n"
+            f"🏦 محفظة TON:\n`{wallet}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    if text == "💰 رصيدي":
+        balance, refs = get_balance(user.id)
+        await update.message.reply_text(
+            f"💰 رصيدك الحالي: {balance:.2f}$\n"
+            f"👥 عدد إحالاتك: {refs}",
+            reply_markup=reply_keyboard()
+        )
+
+    elif text == "🔗 رابط الإحالة":
+        bot_info = await context.bot.get_me()
+        link = f"https://t.me/{bot_info.username}?start={user.id}"
+        await update.message.reply_text(
+            f"🔗 رابط إحالتك الخاص:\n\n`{link}`\n\n"
+            f"شارك هذا الرابط واربح {REWARD_PER_REFERRAL}$ لكل شخص يشترك!",
+            parse_mode="Markdown",
+            reply_markup=reply_keyboard()
+        )
+
+    elif text == "👥 إحالاتي":
+        balance, refs = get_balance(user.id)
+        await update.message.reply_text(
+            f"👥 عدد إحالاتك: {refs}\n"
+            f"💵 إجمالي أرباحك: {refs * REWARD_PER_REFERRAL:.2f}$",
+            reply_markup=reply_keyboard()
+        )
+
+    elif text == "💵 سحب":
+        balance, _ = get_balance(user.id)
+        if balance < MIN_WITHDRAW:
+            await update.message.reply_text(
+                f"❌ رصيدك {balance:.2f}$ أقل من الحد الأدنى للسحب ({MIN_WITHDRAW}$)\n"
+                f"تحتاج {MIN_WITHDRAW - balance:.2f}$ إضافية.",
+                reply_markup=reply_keyboard()
+            )
+        else:
+            context.user_data["awaiting_wallet"] = True
+            context.user_data["withdraw_amount"] = balance
+            await update.message.reply_text(
+                f"💵 رصيدك المتاح: {balance:.2f}$\n\n"
+                "📩 أرسل عنوان محفظة TON الخاصة بك:"
+            )
+
+    elif text == "📋 شروط الاشتراك":
+        await update.message.reply_text(
+            "📋 شروط الاشتراك:\n\n"
+            f"• تحصل على {REWARD_PER_REFERRAL}$ لكل صديق تدعوه\n"
+            f"• الحد الأدنى للسحب: {MIN_WITHDRAW}$\n"
+            "• يجب أن يكون الصديق مشتركاً في القنوات\n"
+            "• السحب عبر محفظة TON فقط\n"
+            "• طلبات السحب تُراجع خلال 24 ساعة",
+            reply_markup=reply_keyboard()
+        )
+
+    elif text == "📣 الدعم والإعلان":
+        await update.message.reply_text(
+            "📣 للدعم والإعلان:\n👉 @Thepenguin133",
+            reply_markup=reply_keyboard()
+        )
+
+# ========== معالج الأزرار المضمنة ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -146,7 +241,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"✅ تم التحقق! أهلاً {user.first_name}\n\n"
                 f"💰 اربح {REWARD_PER_REFERRAL}$ لكل صديق تدعوه!",
-                reply_markup=main_keyboard()
+            )
+            await context.bot.send_message(
+                user.id,
+                f"👋 أهلاً {user.first_name}!\n\n"
+                f"🤖 بوت penguin للإحالات\n"
+                f"💰 اربح {REWARD_PER_REFERRAL}$ لكل صديق تدعوه!\n"
+                f"📌 الحد الأدنى للسحب: {MIN_WITHDRAW}$",
+                reply_markup=reply_keyboard()
             )
         else:
             await query.edit_message_text(
@@ -154,96 +256,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=subscription_keyboard()
             )
 
-    elif query.data == "balance":
-        balance, refs = get_balance(user.id)
-        await query.edit_message_text(
-            f"💰 رصيدك الحالي: {balance:.2f}$\n"
-            f"👥 عدد إحالاتك: {refs}",
-            reply_markup=main_keyboard()
-        )
-
-    elif query.data == "referrals":
-        balance, refs = get_balance(user.id)
-        await query.edit_message_text(
-            f"👥 عدد إحالاتك: {refs}\n"
-            f"💵 أجمالي أرباحك من الإحالات: {refs * REWARD_PER_REFERRAL:.2f}$",
-            reply_markup=main_keyboard()
-        )
-
-    elif query.data == "referral":
-        bot_info = await context.bot.get_me()
-        link = f"https://t.me/{bot_info.username}?start={user.id}"
-        await query.edit_message_text(
-            f"🔗 رابط إحالتك الخاص:\n\n`{link}`\n\n"
-            f"شارك هذا الرابط واربح {REWARD_PER_REFERRAL}$ لكل شخص يشترك!",
-            parse_mode="Markdown",
-            reply_markup=main_keyboard()
-        )
-
-    elif query.data == "withdraw":
-        balance, _ = get_balance(user.id)
-        if balance < MIN_WITHDRAW:
-            await query.edit_message_text(
-                f"❌ رصيدك {balance:.2f}$ أقل من الحد الأدنى للسحب ({MIN_WITHDRAW}$)\n"
-                f"تحتاج {MIN_WITHDRAW - balance:.2f}$ إضافية.",
-                reply_markup=main_keyboard()
-            )
-        else:
-            context.user_data["awaiting_wallet"] = True
-            context.user_data["withdraw_amount"] = balance
-            await query.edit_message_text(
-                f"💵 رصيدك المتاح: {balance:.2f}$\n\n"
-                "📩 أرسل عنوان محفظة TON الخاصة بك:",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ إلغاء", callback_data="cancel")
-                ]])
-            )
-
-    elif query.data == "cancel":
-        context.user_data.pop("awaiting_wallet", None)
-        await query.edit_message_text("تم الإلغاء.", reply_markup=main_keyboard())
-
-    elif query.data == "terms":
-        await query.edit_message_text(
-            "📋 شروط الاشتراك:\n\n"
-            f"• تحصل على {REWARD_PER_REFERRAL}$ لكل صديق تدعوه\n"
-            f"• الحد الأدنى للسحب: {MIN_WITHDRAW}$\n"
-            "• يجب أن يكون الصديق مشتركاً في القنوات\n"
-            "• السحب عبر محفظة TON فقط\n"
-            "• طلبات السحب تُراجع خلال 24 ساعة",
-            reply_markup=main_keyboard()
-        )
-
-    elif query.data == "support":
-        await query.edit_message_text(
-            "📣 للدعم والإعلان:\n👉 @Thepenguin133",
-            reply_markup=main_keyboard()
-        )
-
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if context.user_data.get("awaiting_wallet"):
-        wallet = update.message.text.strip()
-        amount = context.user_data["withdraw_amount"]
-        add_withdrawal(user.id, amount, wallet)
-        context.user_data.pop("awaiting_wallet", None)
-        context.user_data.pop("withdraw_amount", None)
-
-        await update.message.reply_text(
-            "✅ تم تقديم طلب السحب وسيتم مراجعته من قبل الإدارة.",
-            reply_markup=main_keyboard()
-        )
-
-        username = f"@{user.username}" if user.username else str(user.id)
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"💵 طلب سحب جديد!\n\n"
-            f"👤 المستخدم: {username} ({user.id})\n"
-            f"💰 المبلغ: {amount:.2f}$\n"
-            f"🏦 محفظة TON:\n`{wallet}`",
-            parse_mode="Markdown"
-        )
-
+# ========== أوامر الأدمن ==========
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -260,6 +273,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ طلبات سحب معلقة: {pending}"
     )
 
+# ========== التشغيل ==========
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
