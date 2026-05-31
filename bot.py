@@ -19,7 +19,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
-        balance REAL DEFAULT 0,
+        balance REAL DEFAULT 0.0,
         referrals INTEGER DEFAULT 0,
         referred_by INTEGER DEFAULT NULL,
         joined_at TEXT
@@ -38,36 +38,58 @@ def init_db():
 def get_user(user_id):
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    c.execute("SELECT * FROM users WHERE user_id=?", (int(user_id),))
     row = c.fetchone()
     conn.close()
     return row
 
 def add_user(user_id, username, referred_by=None):
+    """
+    تقوم هذه الدالة بإضافة المستخدم الجديد وزيادة رصيد المُحيل 
+    فقط إذا كان المُحيل موجوداً والمستخدم الجديد يسجل لأول مرة.
+    تُرجع True إذا تمت الإحالة بنجاح، وإلا تُرجع False.
+    """
+    success = False
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username, referred_by, joined_at) VALUES (?,?,?,?)",
-              (user_id, username, referred_by, datetime.now().isoformat()))
-    if referred_by and referred_by != user_id:
-        c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?",
-                  (REWARD_PER_REFERRAL, referred_by))
-    conn.commit()
+    
+    user_id = int(user_id)
+    if referred_by:
+        referred_by = int(referred_by)
+
+    c.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
+    exists = c.fetchone()
+    
+    if not exists:
+        c.execute("INSERT INTO users (user_id, username, referred_by, joined_at) VALUES (?,?,?,?)",
+                  (user_id, username, referred_by, datetime.now().isoformat()))
+        conn.commit()
+        
+        if referred_by and referred_by != user_id:
+            c.execute("SELECT user_id FROM users WHERE user_id=?", (referred_by,))
+            referrer_exists = c.fetchone()
+            if referrer_exists:
+                c.execute("UPDATE users SET balance = balance + ?, referrals = referrals + 1 WHERE user_id = ?",
+                          (REWARD_PER_REFERRAL, referred_by))
+                conn.commit()
+                success = True
     conn.close()
+    return success
 
 def get_balance(user_id):
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
-    c.execute("SELECT balance, referrals FROM users WHERE user_id=?", (user_id,))
+    c.execute("SELECT balance, referrals FROM users WHERE user_id=?", (int(user_id),))
     row = c.fetchone()
     conn.close()
-    return row if row else (0, 0)
+    return row if row else (0.0, 0)
 
 def add_withdrawal(user_id, amount, wallet):
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
     c.execute("INSERT INTO withdrawals (user_id, amount, wallet, requested_at) VALUES (?,?,?,?)",
-              (user_id, amount, wallet, datetime.now().isoformat()))
-    c.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, user_id))
+              (int(user_id), float(amount), wallet, datetime.now().isoformat()))
+    c.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (float(amount), int(user_id)))
     conn.commit()
     conn.close()
 
@@ -97,13 +119,20 @@ def subscription_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
-    referred_by = int(args[0]) if args and args[0].isdigit() else None
+    
+    # تنظيف وتجهيز معرف المحيل ليكون رقماً صحيحاً دائماً
+    referred_by = None
+    if args and args[0].isdigit():
+        referred_by = int(args[0])
+
     existing = get_user(user.id)
 
     if not existing:
-        # مستخدم جديد
-        add_user(user.id, user.username or user.first_name, referred_by)
-        if referred_by and referred_by != user.id:
+        # إضافة المستخدم والتحقق هل تمت الإحالة للمُحيل بنجاح؟
+        is_referral_added = add_user(user.id, user.username or user.first_name, referred_by)
+        
+        # نرسل رسالة للمُحيل فقط لو الدالة أكدت إضافة الرصيد له بنجاح
+        if is_referral_added and referred_by:
             try:
                 await context.bot.send_message(
                     referred_by,
@@ -112,21 +141,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
     elif existing and referred_by and existing[4] is None and referred_by != user.id:
-        # مستخدم موجود بدون محيل - أضف المحيل
+        # حالة إذا كان المستخدم مسجل سابقاً بدون رابط إحالة وجاء برابط إحالة الآن
         conn = sqlite3.connect("bot.db")
         c = conn.cursor()
-        c.execute("UPDATE users SET referred_by=? WHERE user_id=?", (referred_by, user.id))
-        c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?",
-                  (REWARD_PER_REFERRAL, referred_by))
-        conn.commit()
+        c.execute("SELECT user_id FROM users WHERE user_id=?", (referred_by,))
+        if c.fetchone():
+            c.execute("UPDATE users SET referred_by=? WHERE user_id=?", (referred_by, user.id))
+            c.execute("UPDATE users SET balance = balance + ?, referrals = referrals + 1 WHERE user_id = ?",
+                      (REWARD_PER_REFERRAL, referred_by))
+            conn.commit()
+            try:
+                await context.bot.send_message(
+                    referred_by,
+                    f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL}$"
+                )
+            except:
+                pass
         conn.close()
-        try:
-            await context.bot.send_message(
-                referred_by,
-                f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL}$"
-            )
-        except:
-            pass
 
     subscribed = await check_subscriptions(user.id, context)
     if not subscribed:
@@ -135,6 +166,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=subscription_keyboard()
         )
         return
+        
     await update.message.reply_text(
         f"👋 أهلاً {user.first_name}!\n\n"
         f"🤖 بوت penguin للإحالات\n"
@@ -146,6 +178,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
+    
     if context.user_data.get("awaiting_wallet"):
         wallet = text.strip()
         amount = context.user_data["withdraw_amount"]
@@ -166,6 +199,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
+
     if text == "💰 رصيدي":
         balance, refs = get_balance(user.id)
         await update.message.reply_text(
@@ -204,9 +238,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📋 شروط الاشتراك:\n\n"
             f"• تحصل على {REWARD_PER_REFERRAL}$ لكل صديق\n"
             f"• الحد الأدنى للسحب: {MIN_WITHDRAW}$\n"
-            "• يجب اشتراك الصديق في القنوات\n"
-            "• السحب عبر محفظة TON فقط\n"
-            "• طلبات السحب تُراجع خلال 24 ساعة",
+            f"• يجب اشتراك الصديق في القنوات\n"
+            f"• السحب عبر محفظة TON فقط\n"
+            f"• طلبات السحب تُراجع خلال 24 ساعة",
             reply_markup=reply_keyboard()
         )
     elif text == "📣 الدعم والإعلان":
@@ -260,7 +294,7 @@ def main():
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    print("✅ البوت يعمل...")
+    print("✅ البوت يعمل بنجاح والإصلاحات مفعّلة...")
     app.run_polling()
 
 if __name__ == "__main__":
