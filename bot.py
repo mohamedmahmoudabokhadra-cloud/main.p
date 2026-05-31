@@ -98,7 +98,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
     referred_by = int(args[0]) if args and args[0].isdigit() else None
-    if not get_user(user.id):
+    existing = get_user(user.id)
+
+    if not existing:
+        # مستخدم جديد
         add_user(user.id, user.username or user.first_name, referred_by)
         if referred_by and referred_by != user.id:
             try:
@@ -108,6 +111,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except:
                 pass
+    elif existing and referred_by and existing[4] is None and referred_by != user.id:
+        # مستخدم موجود بدون محيل - أضف المحيل
+        conn = sqlite3.connect("bot.db")
+        c = conn.cursor()
+        c.execute("UPDATE users SET referred_by=? WHERE user_id=?", (referred_by, user.id))
+        c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?",
+                  (REWARD_PER_REFERRAL, referred_by))
+        conn.commit()
+        conn.close()
+        try:
+            await context.bot.send_message(
+                referred_by,
+                f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL}$"
+            )
+        except:
+            pass
+
     subscribed = await check_subscriptions(user.id, context)
     if not subscribed:
         await update.message.reply_text(
