@@ -17,7 +17,7 @@ DB_HOST = "db.hdbbhhgnphtkiugtomvm.supabase.co"
 DB_NAME = "postgres"
 DB_USER = "postgres"
 DB_PASS = os.getenv("DB_PASS", "a1s2d3f411@@#@&6")
-DB_PORT = 5432
+DB_PORT = 6543
 
 def get_db():
     return pg8000.native.Connection(
