@@ -1,6 +1,5 @@
 import os
-import asyncpg
-import asyncio
+import psycopg2
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -15,12 +14,13 @@ REWARD_PER_REFERRAL = 0.02
 MIN_WITHDRAW = 0.2
 DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:a1s2d3f411@@#@&6@db.hdbbhhgnphtkiugtomvm.supabase.co:5432/postgres")
 
-async def get_db():
-    return await asyncpg.connect(DB_URL)
+def get_db():
+    return psycopg2.connect(DB_URL)
 
-async def init_db():
-    conn = await get_db()
-    await conn.execute('''CREATE TABLE IF NOT EXISTS users (
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
         username TEXT,
         balance REAL DEFAULT 0,
@@ -28,7 +28,7 @@ async def init_db():
         referred_by BIGINT DEFAULT NULL,
         joined_at TEXT
     )''')
-    await conn.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
+    c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
         id SERIAL PRIMARY KEY,
         user_id BIGINT,
         amount REAL,
@@ -36,41 +36,50 @@ async def init_db():
         status TEXT DEFAULT 'pending',
         requested_at TEXT
     )''')
-    await conn.close()
+    conn.commit()
+    conn.close()
 
-async def get_user(user_id):
-    conn = await get_db()
-    row = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
-    await conn.close()
+def get_user(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
+    row = c.fetchone()
+    conn.close()
     return row
 
-async def add_user(user_id, username, referred_by=None):
-    conn = await get_db()
-    await conn.execute(
-        "INSERT INTO users (user_id, username, referred_by, joined_at) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
-        user_id, username, referred_by, datetime.now().isoformat()
+def add_user(user_id, username, referred_by=None):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO users (user_id, username, referred_by, joined_at) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+        (user_id, username, referred_by, datetime.now().isoformat())
     )
     if referred_by and referred_by != user_id:
-        await conn.execute(
-            "UPDATE users SET balance=balance+$1, referrals=referrals+1 WHERE user_id=$2",
-            REWARD_PER_REFERRAL, referred_by
+        c.execute(
+            "UPDATE users SET balance=balance+%s, referrals=referrals+1 WHERE user_id=%s",
+            (REWARD_PER_REFERRAL, referred_by)
         )
-    await conn.close()
+    conn.commit()
+    conn.close()
 
-async def get_balance(user_id):
-    conn = await get_db()
-    row = await conn.fetchrow("SELECT balance, referrals FROM users WHERE user_id=$1", user_id)
-    await conn.close()
-    return (row['balance'], row['referrals']) if row else (0, 0)
+def get_balance(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT balance, referrals FROM users WHERE user_id=%s", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row if row else (0, 0)
 
-async def add_withdrawal(user_id, amount, wallet):
-    conn = await get_db()
-    await conn.execute(
-        "INSERT INTO withdrawals (user_id, amount, wallet, requested_at) VALUES ($1,$2,$3,$4)",
-        user_id, amount, wallet, datetime.now().isoformat()
+def add_withdrawal(user_id, amount, wallet):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO withdrawals (user_id, amount, wallet, requested_at) VALUES (%s,%s,%s,%s)",
+        (user_id, amount, wallet, datetime.now().isoformat())
     )
-    await conn.execute("UPDATE users SET balance=balance-$1 WHERE user_id=$2", amount, user_id)
-    await conn.close()
+    c.execute("UPDATE users SET balance=balance-%s WHERE user_id=%s", (amount, user_id))
+    conn.commit()
+    conn.close()
 
 async def check_subscriptions(user_id, context):
     for channel in CHANNELS:
@@ -99,8 +108,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
     referred_by = int(args[0]) if args and args[0].isdigit() else None
-    if not await get_user(user.id):
-        await add_user(user.id, user.username or user.first_name, referred_by)
+    if not get_user(user.id):
+        add_user(user.id, user.username or user.first_name, referred_by)
         if referred_by and referred_by != user.id:
             try:
                 await context.bot.send_message(
@@ -130,7 +139,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_wallet"):
         wallet = text.strip()
         amount = context.user_data["withdraw_amount"]
-        await add_withdrawal(user.id, amount, wallet)
+        add_withdrawal(user.id, amount, wallet)
         context.user_data.pop("awaiting_wallet", None)
         context.user_data.pop("withdraw_amount", None)
         await update.message.reply_text(
@@ -148,7 +157,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     if text == "💰 رصيدي":
-        balance, refs = await get_balance(user.id)
+        balance, refs = get_balance(user.id)
         await update.message.reply_text(
             f"💰 رصيدك الحالي: {balance:.2f}$\n👥 عدد إحالاتك: {refs}",
             reply_markup=reply_keyboard()
@@ -161,13 +170,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=reply_keyboard()
         )
     elif text == "👥 إحالاتي":
-        balance, refs = await get_balance(user.id)
+        balance, refs = get_balance(user.id)
         await update.message.reply_text(
             f"👥 عدد إحالاتك: {refs}\n💵 إجمالي أرباحك: {refs * REWARD_PER_REFERRAL:.2f}$",
             reply_markup=reply_keyboard()
         )
     elif text == "💵 سحب":
-        balance, _ = await get_balance(user.id)
+        balance, _ = get_balance(user.id)
         if balance < MIN_WITHDRAW:
             await update.message.reply_text(
                 f"❌ رصيدك {balance:.2f}$ أقل من الحد الأدنى ({MIN_WITHDRAW}$)\n"
@@ -221,10 +230,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    conn = await get_db()
-    total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-    pending = await conn.fetchval("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")
-    await conn.close()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")
+    pending = c.fetchone()[0]
+    conn.close()
     await update.message.reply_text(
         f"📊 إحصائيات البوت:\n\n"
         f"👥 إجمالي المستخدمين: {total_users}\n"
@@ -232,7 +244,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def main():
-    asyncio.get_event_loop().run_until_complete(init_db())
+    init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", admin_stats))
