@@ -9,7 +9,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 ADMIN_ID = 868999453
-CHANNELS = ["@penguin_110", "@Crypto_Dragon13"]
+CHANNELS = ["@penguin_110", "@Crypto_Dragon13", "@Crypto_Kings5"]
 REWARD_PER_REFERRAL = 0.02
 MIN_WITHDRAW = 0.2
 
@@ -22,7 +22,8 @@ def init_db():
         balance REAL DEFAULT 0,
         referrals INTEGER DEFAULT 0,
         referred_by INTEGER DEFAULT NULL,
-        joined_at TEXT
+        joined_at TEXT,
+        verified INTEGER DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,16 +50,29 @@ def add_user(user_id, username, referred_by=None):
     c.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
     exists = c.fetchone()
     if not exists:
-        c.execute("INSERT INTO users (user_id, username, referred_by, joined_at) VALUES (?,?,?,?)",
+        c.execute("INSERT INTO users (user_id, username, referred_by, joined_at, verified) VALUES (?,?,?,?,0)",
                   (user_id, username, referred_by, datetime.now().isoformat()))
         conn.commit()
+    conn.close()
+
+def verify_user(user_id):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT verified, referred_by FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if row and row[0] == 0:
+        c.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
+        referred_by = row[1]
         if referred_by and referred_by != user_id:
             c.execute("SELECT user_id FROM users WHERE user_id=?", (referred_by,))
             if c.fetchone():
                 c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?",
                           (REWARD_PER_REFERRAL, referred_by))
-                conn.commit()
+        conn.commit()
+        conn.close()
+        return referred_by
     conn.close()
+    return None
 
 def get_balance(user_id):
     conn = sqlite3.connect("bot.db")
@@ -104,41 +118,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
     referred_by = int(args[0]) if args and args[0].isdigit() else None
-
-    # debug
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"🔍 DEBUG:\nuser_id: {user.id}\nreferred_by: {referred_by}\nargs: {args}\nexisting: {get_user(user.id)}"
-    )
-
     existing = get_user(user.id)
+
     if not existing:
         add_user(user.id, user.username or user.first_name, referred_by)
-        if referred_by and referred_by != user.id:
-            try:
-                await context.bot.send_message(
-                    referred_by,
-                    f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL}$"
-                )
-            except:
-                pass
-    elif existing and referred_by and existing[4] is None and referred_by != user.id:
-        conn = sqlite3.connect("bot.db")
-        c = conn.cursor()
-        c.execute("UPDATE users SET referred_by=? WHERE user_id=?", (referred_by, user.id))
-        c.execute("SELECT user_id FROM users WHERE user_id=?", (referred_by,))
-        if c.fetchone():
-            c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?",
-                      (REWARD_PER_REFERRAL, referred_by))
-        conn.commit()
-        conn.close()
-        try:
-            await context.bot.send_message(
-                referred_by,
-                f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL}$"
-            )
-        except:
-            pass
 
     subscribed = await check_subscriptions(user.id, context)
     if not subscribed:
@@ -147,6 +130,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=subscription_keyboard()
         )
         return
+
+    user_data = get_user(user.id)
+    if user_data and user_data[6] == 0:
+        referred_by_id = verify_user(user.id)
+        if referred_by_id:
+            try:
+                await context.bot.send_message(
+                    referred_by_id,
+                    f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL}$"
+                )
+            except:
+                pass
+
     await update.message.reply_text(
         f"👋 أهلاً {user.first_name}!\n\n"
         f"🤖 بوت penguin للإحالات\n"
@@ -154,6 +150,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 الحد الأدنى للسحب: {MIN_WITHDRAW}$",
         reply_markup=reply_keyboard()
     )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    if query.data == "check_sub":
+        subscribed = await check_subscriptions(user.id, context)
+        if subscribed:
+            referred_by_id = verify_user(user.id)
+            if referred_by_id:
+                try:
+                    await context.bot.send_message(
+                        referred_by_id,
+                        f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL}$"
+                    )
+                except:
+                    pass
+            await query.edit_message_text(f"✅ تم التحقق! أهلاً {user.first_name}")
+            await context.bot.send_message(
+                user.id,
+                f"👋 أهلاً {user.first_name}!\n\n"
+                f"🤖 بوت penguin للإحالات\n"
+                f"💰 اربح {REWARD_PER_REFERRAL}$ لكل صديق تدعوه!\n"
+                f"📌 الحد الأدنى للسحب: {MIN_WITHDRAW}$",
+                reply_markup=reply_keyboard()
+            )
+        else:
+            await query.edit_message_text(
+                "❌ لم تشترك في جميع القنوات!\nاشترك ثم اضغط تحققت.",
+                reply_markup=subscription_keyboard()
+            )
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -181,7 +209,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "💰 رصيدي":
         balance, refs = get_balance(user.id)
         await update.message.reply_text(
-            f"💰 رصيدك الحالي: {balance:.2f}$\n👥 عدد إحالاتك: {refs}",
+            f"💰 رصيدك الحالي: {round(balance, 2)}$\n👥 عدد إحالاتك: {refs}",
             reply_markup=reply_keyboard()
         )
     elif text == "🔗 رابط الإحالة":
@@ -194,22 +222,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "👥 إحالاتي":
         balance, refs = get_balance(user.id)
         await update.message.reply_text(
-            f"👥 عدد إحالاتك: {refs}\n💵 إجمالي أرباحك: {refs * REWARD_PER_REFERRAL:.2f}$",
+            f"👥 عدد إحالاتك: {refs}\n💵 إجمالي أرباحك: {round(refs * REWARD_PER_REFERRAL, 2)}$",
             reply_markup=reply_keyboard()
         )
     elif text == "💵 سحب":
         balance, _ = get_balance(user.id)
         if round(balance, 2) < MIN_WITHDRAW:
             await update.message.reply_text(
-                f"❌ رصيدك {balance:.2f}$ أقل من الحد الأدنى ({MIN_WITHDRAW}$)\n"
-                f"تحتاج {MIN_WITHDRAW - balance:.2f}$ إضافية.",
+                f"❌ رصيدك {round(balance, 2)}$ أقل من الحد الأدنى ({MIN_WITHDRAW}$)\n"
+                f"تحتاج {round(MIN_WITHDRAW - balance, 2)}$ إضافية.",
                 reply_markup=reply_keyboard()
             )
         else:
             context.user_data["awaiting_wallet"] = True
-            context.user_data["withdraw_amount"] = balance
+            context.user_data["withdraw_amount"] = round(balance, 2)
             await update.message.reply_text(
-                f"💵 رصيدك المتاح: {balance:.2f}$\n\n📩 أرسل عنوان محفظة TON:"
+                f"💵 رصيدك المتاح: {round(balance, 2)}$\n\n📩 أرسل عنوان محفظة TON:"
             )
     elif text == "📋 شروط الاشتراك":
         await update.message.reply_text(
@@ -226,28 +254,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📣 للدعم والإعلان:\n👉 @Thepenguin133",
             reply_markup=reply_keyboard()
         )
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    if query.data == "check_sub":
-        subscribed = await check_subscriptions(user.id, context)
-        if subscribed:
-            await query.edit_message_text(f"✅ تم التحقق! أهلاً {user.first_name}")
-            await context.bot.send_message(
-                user.id,
-                f"👋 أهلاً {user.first_name}!\n\n"
-                f"🤖 بوت penguin للإحالات\n"
-                f"💰 اربح {REWARD_PER_REFERRAL}$ لكل صديق تدعوه!\n"
-                f"📌 الحد الأدنى للسحب: {MIN_WITHDRAW}$",
-                reply_markup=reply_keyboard()
-            )
-        else:
-            await query.edit_message_text(
-                "❌ لم تشترك في جميع القنوات!\nاشترك ثم اضغط تحققت.",
-                reply_markup=subscription_keyboard()
-            )
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
