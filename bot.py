@@ -9,7 +9,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 ADMIN_ID = 868999453
-CHANNELS = ["@penguin_110", "@Crypto_Dragon13", "@Crypto_Kings5"]
+CHANNELS = ["@penguin_110", "@Crypto_Dragon13"]
 REWARD_PER_REFERRAL = 0.02
 MIN_WITHDRAW = 0.2
 
